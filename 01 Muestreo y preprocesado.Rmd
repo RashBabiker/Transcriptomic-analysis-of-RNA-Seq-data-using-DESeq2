@@ -1,0 +1,120 @@
+---
+title: "Selección y prepocesado"
+output: html_notebook
+---
+
+# Librerias usadas
+
+```{r}
+library(tidyverse); library(DESeq2)
+```
+
+# Selección de los datos
+
+```{r}
+targets <- read.csv("datos originales/targets.csv")
+counts <- read.csv2("datos originales/counts.csv")
+
+rownames(counts) <- counts$X
+counts <- counts %>% select(-X) 
+
+head(counts)
+```
+
+Se eligen 10 muestras de cada grupo:
+
+```{r}
+set.seed(123)
+
+targets %>% group_by(Group) %>% summarise(count = n())
+
+ELI <- targets %>% filter(Group=="ELI")
+ELI <- ELI[sample(1:nrow(ELI), size = 10),]
+
+NIT <- targets %>% filter(Group=="NIT")
+NIT <- NIT[sample(1:nrow(NIT), size = 10),]
+
+SFI <- targets %>% filter(Group=="SFI")
+SFI <- SFI[sample(1:nrow(SFI), size = 10),]
+
+targets <- rbind.data.frame(ELI, NIT,SFI) %>% arrange() # sin el arrange me da error
+targets$Group <- factor(targets$Group, levels = c("NIT", "SFI", "ELI"))
+
+targets %>% group_by(Group) %>% summarise(count = n())
+```
+
+Se seleccionan las mismas 30 muestras en la matriz de cuentas:
+
+```{r}
+targets$Sample_Name <- gsub("-",".", targets$Sample_Name)
+counts <- counts[,targets$Sample_Name]
+rownames(targets) <- targets$Sample_Name
+```
+
+# Normalización
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = targets,
+				                      design= ~ Group)
+# counts(dds) # las cuentas se obtienen con esta función
+
+dds <- DESeq(dds, parallel = F)
+```
+
+# Filtrado
+
+```{r}
+nrow(dds)
+
+#  elimino los genes sin cuentas o solo con una
+dds <- dds[rowSums(counts(dds)) > 1,] 
+# Si luego se ve necesario se puede ser más exigente, yo en el TFM he eliminado los genes que tienen menos de 5 cuentas.
+nrow(dds)
+nrow(counts)-nrow(dds) # genes eliminados
+
+```
+
+# Transformación
+
+Los análisis de visualización y clustering funcionan mejor con datos homocedásticos, es decir, datos en los que la varianza es homogénea. Sin embargo, las cuentas en bruto de RNAseq no son homocedásticas, la varianza aumenta con la media.
+Por ello se transforman las cuentas usando la función rlog (regularized log transformation) y VST, la transformación que de mejores resultados será la que se use.
+
+```{r}
+# Normalización por rlog:
+
+r_log <- rlog(dds,blind=F) # blind dispersion estimation is not the appropriate choice if one expects that many or the majority of genes (rows) will have large differences in counts which are explainable by the experimental design, and one wishes to transform the data for downstream analysis. http://bioconductor.org/packages/release/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#why-un-normalized-counts
+# Normalización por VST:
+vsd <- vst(dds) 
+```
+
+Comparo las dos transformaciones
+
+```{r}
+df <- bind_rows(
+  as.data.frame(assay(r_log)[, 1:2]) %>% mutate(transformation = "rlog"),
+  as.data.frame(assay(vsd)[, 1:2]) %>% mutate(transformation = "vst"))
+
+sum(df$transformation=="vst")
+  
+colnames(df)[1:2] <- c("x", "y")  
+
+lvls <- c("vst", "rlog")
+df$transformation <- factor(df$transformation, levels=lvls)
+
+ggplot(df, aes(x = x, y = y)) + geom_hex(bins = 80) +
+  coord_fixed() + facet_grid( . ~ transformation)+
+  geom_abline(intercept = 0, slope = 1, color="red", 
+                 linetype="dashed", size=0.5)
+```
+
+La transformación rlog parece que tiene menor dispersión, la usaré aunque tarde un poco más. Como lo voy a guardar como un archivo de R no es un problema.
+
+```{r}
+save(file = "materiales intermedios/dds_rlog.Rda", r_log)
+save(file = "materiales intermedios/dds_raw.Rda", dds)
+
+beepr::beep(3)
+```
+
+A partir de estos archivos se hacen, en scripts distintos, los análisis de expresión diferencial 2 a 2, pero antes se va a hacer un análisis descriptivo previo para valorar la calidad de las muestras y relaciones entre los tres tipos de muestras.

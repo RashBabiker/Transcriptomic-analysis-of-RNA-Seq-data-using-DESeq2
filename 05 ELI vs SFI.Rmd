@@ -1,0 +1,228 @@
+---
+title: "Análisis de expresión diferencial ELI vs SFI"
+output:
+  html_notebook: default
+bibliography: bibliografía/bibliography.bib
+---
+
+Las explicaciones y justificaciones de los pasos dados están en el archivo 03 ELI vs NIT
+
+# librerias usadas
+
+```{r}
+library(tidyverse); library(DESeq2); library(apeglm); library(Cairo); library(pheatmap); library(EnhancedVolcano); library(clusterProfiler); library(enrichplot); library(pathview)
+library(AnnotationDbi); library(org.Hs.eg.db)
+```
+
+# Preparación del análisis de expresión de ELI vs SFI
+
+## Filtrado
+
+```{r}
+load("materiales intermedios/dds_raw.Rda")
+
+FC <- 1.5; alpha <- 0.05
+eli_sfi <- results(dds, contrast=c("Group", "ELI", "SFI"), alpha = alpha)
+eli_sfi_ashr <- lfcShrink(dds, contrast=c("Group", "ELI", "SFI"), type = "ashr", res=eli_sfi) # Con ashr shrink
+
+summary(eli_sfi_ashr)
+
+(p <- EnhancedVolcano(eli_sfi_ashr, FCcutoff = FC, lab = "", x = 'log2FoldChange',
+                pCutoff = alpha, y = 'pvalue', title = "Volcano ELI vs SFI", 
+                subtitle = paste0("Genes diferencialmente expresados: ",
+                                  sum((eli_sfi_ashr$padj < alpha)& abs(eli_sfi_ashr$log2FoldChange)>FC, na.rm=T)),
+                gridlines.major = F, gridlines.minor = F))
+
+
+dir.create("resultados/ELI vs SFI")
+dir.create("resultados/ELI vs SFI/imagenes")
+
+cairo_pdf("resultados/ELI vs SFI/Volcano.pdf")
+p
+dev.off()
+
+png("resultados/ELI vs SFI/imagenes/Volcano.png", height = 1500, width = 2000, res=200)
+p
+dev.off()
+```
+
+Los genes elegidos son los marcados en rojo, son `r sum((eli_sfi_ashr$padj < alpha)& abs(eli_sfi_ashr$log2FoldChange)>FC, na.rm=T)` de un total de `r nrow(eli_sfi_ashr)`, lo que supone el `r round(sum((eli_sfi_ashr$padj < alpha)& abs(eli_sfi_ashr$log2FoldChange)>FC, na.rm=T)/(nrow(eli_sfi_ashr)),4)*100`%.
+
+Hay más genes expresados que en SFIvsNIT pero menos que en ELIvsNIT, la distribución de p-valores también está en un punto intermedio entre estas comparaciónes. esto indica que ELI se diferencia mucho de SFI y NIT, más que estos entre sí. 
+
+```{r}
+# se quitan los genes cuyas cuentas normalizadas en promedio no llegan a 1 porque añaden ruido
+pvalores_eli_sfi_ashr <- eli_sfi_ashr$pvalue[eli_sfi_ashr$baseMean > 1] 
+
+hist(pvalores_eli_sfi_ashr, breaks = 0:20/20,
+     col = "grey50", border = "white", probability = T,
+     main = "apeglm shrink")
+```
+
+# Anotación y análisis de expresión
+
+Usando el fold change de `r FC` y el nivel de significación `r alpha` los genes diferencialmente expresados son los siguientes:
+
+```{r}
+# corta los nombres a strings de 15, para dejar el nombre de ensembl y que así se pueda localizar con 
+# mapIds con las keys
+ens.str <- substr(rownames(eli_sfi), 1, 15) 
+
+columns(org.Hs.eg.db)
+
+eli_sfi_ashr$SYMBOL <- mapIds(org.Hs.eg.db, keys=ens.str, keytype="ENSEMBL", multiVals="first",
+                              column="SYMBOL") # la columna que añade
+eli_sfi_ashr$ENTREZID <- mapIds(org.Hs.eg.db, keys=ens.str, keytype="ENSEMBL", multiVals="first",
+                                column="ENTREZID")
+eli_sfi_ashr$GO <- mapIds(org.Hs.eg.db, keys=ens.str, keytype="ENSEMBL", multiVals="first",
+                          column="GO")
+eli_sfi_ashr$PATH <- mapIds(org.Hs.eg.db, keys=ens.str, keytype="ENSEMBL", multiVals="first",
+                            column="PATH")
+eli_sfi_ashr$UNIPROT <- mapIds(org.Hs.eg.db, keys=ens.str, keytype="ENSEMBL", multiVals="first",
+                               column="UNIPROT")
+eli_sfi_ashr$ENZYME <- mapIds(org.Hs.eg.db, keys=ens.str, keytype="ENSEMBL", multiVals="first",
+                              column="ENZYME")
+```
+
+Ordeno por p-valor y le doy formato de dataframe
+
+```{r}
+eli_sfi_DGE <- as.data.frame(eli_sfi_ashr[order(eli_sfi_ashr$pvalue),]) 
+# tabla con todos los genes
+write.csv(as.data.frame(eli_sfi_DGE), file = "resultados/ELI vs SFI/DGE.csv")
+```
+
+Hago una tabla aparte con los `r sum((eli_sfi_ashr$padj < alpha)& abs(eli_sfi_ashr$log2FoldChange)>FC, na.rm=T)` genes de expresión diferencial.
+
+```{r}
+eli_sfiSig <- as.data.frame(subset(eli_sfi_ashr, padj < alpha & abs(log2FoldChange)>FC)) %>% arrange(-log2FoldChange)
+# genes más sobreexpresados
+head(eli_sfiSig)
+# genes más subexpresados
+tail(eli_sfiSig)
+
+write.csv(as.data.frame(eli_sfiSig), file = "resultados/ELI vs SFI/DGE_sig.csv")
+```
+
+# Análisis de sobrerrepresentación (ORA)
+
+```{r}
+# separo los genes
+upregulated <- filter(eli_sfiSig, log2FoldChange>FC) 
+downregulated <- filter(eli_sfiSig, log2FoldChange<(-FC)) 
+# Quito los NAs de EntrezID
+upregulated <- upregulated[!is.na(upregulated$ENTREZID),]
+downregulated <- downregulated[!is.na(downregulated$ENTREZID),]
+
+nrow(upregulated)
+nrow(downregulated)
+```
+
+## GO
+
+```{r}
+upregulated_GO <- enrichGO(upregulated$ENTREZID, 
+                             OrgDb="org.Hs.eg.db", 
+                             pvalueCutoff=0.05,
+                             qvalueCutoff=0.05, 
+                             ont = "BP")
+
+upregulated_GO <- setReadable(upregulated_GO, "org.Hs.eg.db", keyType = "ENTREZID")
+
+head(upregulated_GO)
+```
+
+```{r}
+downregulated_GO <- enrichGO(downregulated$ENTREZID, 
+                             OrgDb="org.Hs.eg.db", 
+                             pvalueCutoff=0.05,
+                             qvalueCutoff=0.05, 
+                             ont = "BP")
+
+downregulated_GO <- setReadable(downregulated_GO, "org.Hs.eg.db", keyType = "ENTREZID")
+
+head(downregulated_GO)
+```
+
+### Términos GO más representados:
+
+```{r}
+p1 <- barplot(upregulated_GO, showCategory = 20) + ggtitle("Categorias GO sobreexpresadas")
+p2 <- barplot(downregulated_GO, showCategory=20) + ggtitle("Categorias GO subexpresadas")
+
+cairo_pdf("resultados/ELI vs SFI/GO barplot.pdf", height = 10, width = 20)
+  plot_grid(p1, p2, ncol=2)
+dev.off()
+
+png("resultados/ELI vs SFI/imagenes/GO barplot.png", height = 1500, width = 2000, res=200)
+  p1 # los subexpresados no tienen nada especialmente interesante
+dev.off()
+```
+
+### Redes de términos GO:
+
+```{r}
+cairo_pdf("resultados/ELI vs SFI/upregulated GO network.pdf", height = 10, width = 20)
+  cnetplot(upregulated_GO, foldChange=upregulated$log2FoldChange)
+dev.off()
+
+png("resultados/ELI vs SFI/imagenes/upregulated GO network.png", height = 1500, width = 2000, res=200)
+  cnetplot(upregulated_GO, foldChange=upregulated$log2FoldChange)
+dev.off()
+```
+
+## KEGG
+
+```{r}
+upregulated_KEGG <- enrichKEGG(gene = upregulated$ENTREZID,
+                               organism = 'hsa', 
+                               pvalueCutoff = 0.05)
+
+upregulated_KEGG <- setReadable(upregulated_KEGG, "org.Hs.eg.db", keyType = "ENTREZID")
+
+head(upregulated_KEGG)
+```
+
+```{r}
+downregulated_KEGG <- enrichKEGG(gene = downregulated$ENTREZID,
+                               organism = 'hsa', 
+                               pvalueCutoff = 0.05)
+
+downregulated_KEGG <- setReadable(downregulated_KEGG, "org.Hs.eg.db", keyType = "ENTREZID")
+
+head(downregulated_KEGG)
+```
+No encuentra ninguna ruta sobrerrepresentada en los SFI, me centro en las muestras ELI.
+
+### Rutas KEGG más representadas:
+
+```{r}
+p1 <- barplot(upregulated_KEGG, showCategory = 20) + ggtitle("Rutas KEGG sobreexpresadas")
+
+cairo_pdf("resultados/ELI vs SFI/ KEGG barplot.pdf", height = 10, width = 10)
+  p1
+dev.off()
+
+png("resultados/ELI vs SFI/imagenes/KEGG barplot.png", height = 1500, width = 3000, res=200)
+  p1
+dev.off()
+```
+
+### Redes de rutas KEGG:
+
+```{r}
+cairo_pdf("resultados/ELI vs SFI/ upregulated KEGG network.pdf", height = 10, width = 20)
+  cnetplot(upregulated_KEGG, foldChange=upregulated$log2FoldChange)
+dev.off()
+
+png("resultados/ELI vs SFI/imagenes/upregulated KEGG network.png", height = 1500, width = 2000, res=200)
+  cnetplot(upregulated_KEGG, foldChange=upregulated$log2FoldChange)
+dev.off()
+```
+
+
+
+
+```{r}
+beepr::beep(3)
+```

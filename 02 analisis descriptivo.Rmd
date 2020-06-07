@@ -1,0 +1,125 @@
+---
+title: "Análisis descriptivo y diagnóstico"
+output: html_notebook
+---
+
+# librerias usadas
+
+```{r}
+library(DESeq2); library(pheatmap); library(RColorBrewer); library(sva); library(tidyverse);
+library(Cairo); library(viridis)
+```
+
+```{r}
+load("materiales intermedios/dds_rlog.Rda")
+load("materiales intermedios/dds_raw.Rda")
+```
+
+Se hará una breve descripción visual de las muestras, para ver cuanto se parecen las replicas de los grupos, y las diferencias entre grupos.
+
+# Matriz de distancias
+
+Para visualizar el parecido entre muestras se pueden calcular la distancia euclidea entre estas, con la función dist(), se visualizan las diferencias entre las distintas muestras mediante un mapa de calor. Para hacer clustering se recomienda usar datos homocedásticos, por lo que uso los datos transformados por rlog.
+
+```{r}
+# su transpone la matriz de cuentas porque dist() espera que las muestras estén en filas distintas.
+sampleDists <- dist(t(assay(r_log)))
+head(sampleDists)
+```
+
+```{r message=FALSE, fig.align='center', fig.width=6, fig.height=4}
+sampleDistMatrix <- as.matrix( sampleDists )
+rownames(sampleDistMatrix) <- r_log$Group
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+
+p <- pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = viridis(300,begin = 0.2))
+p
+
+dir.create("resultados", showWarnings = F)
+
+cairo_pdf("resultados/matriz de distancias.pdf")
+p # se ve mejor en el pdf
+dev.off()
+
+png("resultados/matriz de distancias.png", height = 1500, width = 2000, res=200)
+p
+dev.off()
+```
+Hay una clara diferenciación en los patrones de expresión entre ELI (infiltraciones extensivas) y NIT (sin infiltraciones), pero los SFI (infiltraciones pequeñas) aparecen cerca de ambos como un punto intermedio, tiene sentido porque fenotípicamente SFI está entre ELI y NIT. 
+
+# Analisis de componentes principales (PCA)
+
+El PCA funciona mejor con datos homocedásticos, por lo que uso los datos transformados por rlog.
+
+```{r fig.align='center', fig.width=5, fig.height=5}
+plotPCA(r_log, intgroup = c("Group"))
+png("resultados/PCA.png", height = 1500, width = 2000, res=200)
+  plotPCA(r_log, intgroup = c("Group"))
+dev.off()
+cairo_pdf("resultados/PCA.pdf")
+  plotPCA(r_log, intgroup = c("Group"))
+dev.off()
+```
+
+Igual que en el gráfico anterior, se ven diferencias entre NIT y ELI, pero la diferenciación con SFI no está tan clara, aunque se ve una tendencia a tener un patrón de expresión a medio camino entre los de ELI y NIT. 
+
+# Diagnóstico de batch effect
+
+Las diferencias de transcripción observadas son el resultado de un diseño del experimento en el que se valora solo el grado de filtración, pero puede haber otras variables que influyan en el transcriptoma, para confirmarlo se van a calcular dos variables surrogadas y se van a separar las muestras en función de estas variables.
+Si hay una separación importante se repetirá el procesado desde la función DESeqDataSetFromMatrix() del archivo "selección y preprocesado", con el nuevo diseño, incluyendo las variables surrogadas.
+
+```{r}
+# Uso los datos crudos (bueno, normalizados por DESEq), no los transformados con rlog porque counts() da un error
+
+norm.cts <- counts(dds, normalized=TRUE)
+
+mm <- model.matrix(~ Group, colData(dds))
+mm0 <- model.matrix(~ 1, colData(dds))
+norm.cts <- norm.cts[rowSums(norm.cts) > 0,]
+fit <- svaseq(norm.cts, mod=mm, mod0=mm0, n.sv=2)
+
+plot(fit$sv[,1:2], col=dds$Group, cex=1, pch=16,
+     xlab="SV1", ylab="SV2")
+legend("top", levels(dds$Group), pch=16,
+       col=1:3, cex=.8, ncol=3, title="batch")
+```
+
+En el eje Y (variable surrogada 2), no hay ninguna separación, en el eje X (variable surrogada 1), más o menos hay una separación entre ELI y las otras muestras, pero tampoco esta clara, por este motivo se asume que no hay otras variables a tener en cuenta para el resto de los análisis.
+
+En los siguientes archivos se hará el análisis de expresión diferencial. Como las diferencias más notables se encuentran entre los tejidos ELI y NIT se empezará con esta comparación y se ajustarán todos los métodos, las comparaciones SFI vs NIT y ELI vs SFI se harán a continuación siguiendo exactamente el mismo protocolo.
+
+```{r}
+load("materiales intermedios/dds_rlog.Rda")
+topVarGenes <- head(order(rowVars(assay(r_log)), decreasing = TRUE), 250) # es el índice de los genes más variables
+
+mat  <- assay(r_log)[ topVarGenes, ] # hace una tabla con estos
+mat  <- mat - rowMeans(mat) # les resta la media para "centrar" los datos en esta media
+
+anno <- as.data.frame(colData(r_log))%>% dplyr::select(Group)
+
+p <- pheatmap(mat, annotation_col = anno, 
+              show_rownames = F, show_colnames = F,
+              color = viridis(300,begin = 0.2))
+
+cairo_pdf("resultados/heatmap.pdf")
+  p
+dev.off()
+
+png("resultados/heatmap.png", height = 1500, width = 2000, res=200)
+  p
+dev.off()
+```
+
+En el heatmap se ven varias cosas: por un lado se ve una diferenciación clara entre NIT y ELI, similar a lo ya observado en el PCA y matriz de distancias. Por otro lado se ve una expresión diferencial clara en estos genes, aunque eso tiene sentido porque se han elegido los genes más variables. Si las infiltraciones no son evidentes a nivel fenotípico, el análisis de estás secuencias podría usarse como método de diagnóstico.
+
+También se ven diferencia entre el grupo central de ELI, donde estos genes se expresan más que tejidos SFI y otros ELI, lo que sugiere que quizás se pudiera hacer una nueva clasificación, seguramente en ese grupo central de ELI la infiltración es mayor aún. 
+
+<!-- para la discusión -->
+
+```{r}
+beepr::beep(3)
+```
